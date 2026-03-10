@@ -3,10 +3,10 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-INSTALL_DIR="/opt/httphell"
-STATE_DIR="/etc/httphell"
-BIN_PATH="/usr/local/bin/httphell"
-MANAGER_PATH="${INSTALL_DIR}/httphell.sh"
+INSTALL_DIR="/opt/proxybuilder"
+STATE_DIR="/etc/proxybuilder"
+BIN_PATH="/usr/local/bin/proxybuilder"
+MANAGER_PATH="${INSTALL_DIR}/proxybuilder.sh"
 
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"
 
@@ -17,12 +17,12 @@ cat > "$MANAGER_PATH" <<'MANAGER_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-STATE_DIR="/etc/httphell"
+STATE_DIR="/etc/proxybuilder"
 DB_FILE="${STATE_DIR}/proxies.db"
 HTPASSWD_FILE="${STATE_DIR}/squid.passwd"
 CONF_FILE="/etc/squid/squid.conf"
-PROJECT_NAME="HTTPHell"
-PROJECT_REPO="https://github.com/harindujayakody/proxyhell"
+PROJECT_NAME="ProxyBuilder"
+PROJECT_REPO="https://github.com/harindujayakody/proxy-builder"
 PROJECT_AUTHOR="Harindu Jayakody"
 
 mkdir -p "$STATE_DIR"
@@ -35,14 +35,13 @@ YELLOW="\033[1;33m"
 BLUE="\033[1;34m"
 MAGENTA="\033[1;35m"
 CYAN="\033[1;36m"
-WHITE="\033[1;37m"
 DIM="\033[2m"
 BOLD="\033[1m"
 RESET="\033[0m"
 
 require_root() {
   if [[ "$EUID" -ne 0 ]]; then
-    echo -e "${RED}Please run with sudo: sudo httphell${RESET}"
+    echo -e "${RED}Please run with sudo: sudo proxybuilder${RESET}"
     exit 1
   fi
 }
@@ -54,7 +53,7 @@ line() {
 title() {
   clear
   echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
-  echo -e "${CYAN}${BOLD}║                        HTTPHELL                             ║${RESET}"
+  echo -e "${CYAN}${BOLD}║                      PROXY BUILDER                          ║${RESET}"
   echo -e "${CYAN}${BOLD}║            HTTP/HTTPS ONE-CLICK INSTALLER                   ║${RESET}"
   echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
   echo
@@ -149,29 +148,22 @@ rebuild_squid() {
   cp "$CONF_FILE" "${CONF_FILE}.bak.$(date +%s)" 2>/dev/null || true
 
   {
-    echo "# HTTPHell - Auto-generated Squid config"
+    echo "# ProxyBuilder - Auto-generated Squid config"
     echo "# Do not edit manually"
+    echo "# GitHub: https://github.com/harindujayakody/proxy-builder"
     echo
-    echo "# Basic authentication"
     echo "auth_param basic program /usr/lib/squid/basic_ncsa_auth ${HTPASSWD_FILE}"
     echo "auth_param basic children 10"
-    echo "auth_param basic realm HTTPHell Proxy"
+    echo "auth_param basic realm ProxyBuilder"
     echo "auth_param basic credentialsttl 2 hours"
     echo
     echo "acl authenticated proxy_auth REQUIRED"
+    echo "acl CONNECT method CONNECT"
     echo "http_access allow authenticated"
     echo "http_access deny all"
     echo
-    echo "# Transparent HTTPS tunneling"
-    echo "https_port 0 disabled"
-    echo
-    echo "# Enable CONNECT method for HTTPS"
-    echo "acl CONNECT method CONNECT"
-    echo
-    # Write one http_port per proxy
     awk -F: 'NF>=4 { print "http_port " $2 }' "$DB_FILE"
     echo
-    echo "# General settings"
     echo "forwarded_for off"
     echo "via off"
     echo "request_header_access X-Forwarded-For deny all"
@@ -184,7 +176,6 @@ rebuild_squid() {
     echo "refresh_pattern .              0     20% 4320"
     echo
     echo "dns_v4_first on"
-    echo "tcp_outgoing_address 0.0.0.0"
   } > "$CONF_FILE"
 
   squid -k parse 2>/dev/null && {
@@ -192,7 +183,8 @@ rebuild_squid() {
     systemctl restart squid
   } || {
     fail "Squid config parse error. Restoring backup..."
-    cp "${CONF_FILE}.bak."* "$CONF_FILE" 2>/dev/null || true
+    latest_bak="$(ls -t ${CONF_FILE}.bak.* 2>/dev/null | head -n1)"
+    [[ -n "$latest_bak" ]] && cp "$latest_bak" "$CONF_FILE"
     systemctl restart squid || true
   }
 }
@@ -202,6 +194,11 @@ open_ports() {
   for p in "$@"; do
     ufw allow "${p}/tcp" >/dev/null 2>&1 || true
   done
+}
+
+close_port() {
+  local p="$1"
+  ufw delete allow "${p}/tcp" >/dev/null 2>&1 || true
 }
 
 show_proxy_result() {
@@ -221,7 +218,7 @@ show_summary() {
   echo -e "${BOLD}Public IPv4  :${RESET} ${pub_ip:-N/A}"
   echo -e "${BOLD}Total Proxies:${RESET} ${total}"
   echo -e "${BOLD}Database     :${RESET} ${DB_FILE}"
-  echo -e "${BOLD}Command      :${RESET} sudo httphell"
+  echo -e "${BOLD}Command      :${RESET} sudo proxybuilder"
   echo -e "${BOLD}GitHub       :${RESET} ${PROJECT_REPO}"
   line
   echo
@@ -271,17 +268,15 @@ create_custom_batch() {
   ip="$(get_public_ip)"
   [[ -z "$ip" ]] && { fail "No public IPv4 detected."; return; }
 
-  local i port user pass
-  local ports=()
-
   for ((i=0; i<count; i++)); do
     port=$((start_port + i))
     if port_in_db "$port"; then
-      fail "Port already exists: $port"
+      fail "Port already in use: $port"
       return
     fi
   done
 
+  local ports=()
   ok "Creating ${count} HTTP/HTTPS proxies..."
   echo
 
@@ -304,7 +299,6 @@ create_custom_batch() {
 create_random_five() {
   local ip user pass port
   local ports=()
-  local i
 
   ip="$(get_public_ip)"
   [[ -z "$ip" ]] && { fail "No public IPv4 detected."; return; }
@@ -344,7 +338,7 @@ delete_proxy() {
   echo
   read -rp "Enter line number to delete (0 to cancel): " lineno
 
-  if [[ "$lineno" == "0" ]]; then return; fi
+  [[ "$lineno" == "0" ]] && return
 
   if ! [[ "$lineno" =~ ^[0-9]+$ ]] || (( lineno < 1 || lineno > total )); then
     fail "Invalid selection."
@@ -358,10 +352,9 @@ delete_proxy() {
 
   remove_htpasswd_user "$user"
   sed -i "${lineno}d" "$DB_FILE"
-
-  ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
-
+  close_port "$port"
   rebuild_squid
+
   ok "Deleted proxy on port ${port} (user: ${user})"
 }
 
@@ -405,7 +398,6 @@ show_test_commands() {
   while IFS=: read -r ip port user pass; do
     echo -e "${BOLD}Port ${port}:${RESET}"
     echo "  curl -x http://${user}:${pass}@${ip}:${port} https://ifconfig.me"
-    echo "  curl -x https://${user}:${pass}@${ip}:${port} https://ifconfig.me"
     echo
   done < "$DB_FILE"
 }
@@ -413,11 +405,12 @@ show_test_commands() {
 show_recommended_ports() {
   echo
   echo -e "${CYAN}${BOLD}Recommended ports:${RESET} 3128, 8080, 8888, 20000-40000"
-  echo -e "${CYAN}${BOLD}Avoid ports:${RESET} 1-1023, 22, 25, 53, 80, 443, 3306, 5432"
+  echo -e "${CYAN}${BOLD}Avoid ports   :${RESET} 1-1023, 22, 25, 53, 80, 443, 3306, 5432"
   echo
-  echo -e "${CYAN}${BOLD}Protocol info:${RESET}"
-  echo "  HTTP  - Plain HTTP proxy, works with http:// and https:// via CONNECT"
-  echo "  HTTPS - Same port handles both; clients use CONNECT method for TLS"
+  echo -e "${CYAN}${BOLD}Protocol notes:${RESET}"
+  echo "  HTTP  proxy  → works with http:// targets"
+  echo "  HTTPS proxy  → client sends CONNECT, same port handles TLS tunneling"
+  echo "  Format       → http://user:pass@ip:port"
   echo
 }
 
@@ -434,10 +427,10 @@ show_credits() {
 menu() {
   title
   show_summary
-  echo -e "${BOLD}1)${RESET} Random Single Proxy Generate ${DIM}(recommended random port)${RESET}"
+  echo -e "${BOLD}1)${RESET} Random Single Proxy  ${DIM}(random port, instant)${RESET}"
   echo -e "${BOLD}2)${RESET} Choose Port and Quantity"
   echo -e "${BOLD}3)${RESET} Random 5 Proxies"
-  echo -e "${BOLD}4)${RESET} List / Show Created Proxies"
+  echo -e "${BOLD}4)${RESET} List Proxies"
   echo -e "${BOLD}5)${RESET} Test Commands"
   echo -e "${BOLD}6)${RESET} Delete a Proxy"
   echo -e "${BOLD}7)${RESET} Recommended Ports"
@@ -452,16 +445,16 @@ main() {
     menu
     read -rp "Select option [1-9]: " choice
     case "$choice" in
-      1) create_one_random; pause ;;
-      2) create_custom_batch; pause ;;
-      3) create_random_five; pause ;;
-      4) list_proxies; pause ;;
-      5) show_test_commands; pause ;;
-      6) delete_proxy; pause ;;
+      1) create_one_random;      pause ;;
+      2) create_custom_batch;    pause ;;
+      3) create_random_five;     pause ;;
+      4) list_proxies;           pause ;;
+      5) show_test_commands;     pause ;;
+      6) delete_proxy;           pause ;;
       7) show_recommended_ports; pause ;;
-      8) show_credits; pause ;;
+      8) show_credits;           pause ;;
       9) exit 0 ;;
-      *) fail "Invalid option"; sleep 1 ;;
+      *) fail "Invalid option";  sleep 1 ;;
     esac
   done
 }
@@ -474,14 +467,14 @@ ln -sf "$MANAGER_PATH" "$BIN_PATH"
 
 echo
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║                        HTTPHELL                             ║"
+echo "║                      PROXY BUILDER                          ║"
 echo "║            HTTP/HTTPS ONE-CLICK INSTALLER                   ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo
 echo "Installed successfully."
-echo "Project : HTTPHell"
-echo "Command : sudo httphell"
-echo "GitHub  : https://github.com/harindujayakody/proxyhell"
+echo "Project : ProxyBuilder"
+echo "Command : sudo proxybuilder"
+echo "GitHub  : https://github.com/harindujayakody/proxy-builder"
 echo
-echo "Run: sudo httphell"
+echo "Run: sudo proxybuilder"
 echo
